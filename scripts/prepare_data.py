@@ -1,7 +1,10 @@
 """
 Prepare BTS T-100 Domestic Segment data for the Power BI capacity dashboard.
 
-Input : one or more raw T-100 CSV (or single-CSV ZIP) files in data/raw/
+Input : raw T-100 files in data/raw/, in either format (can be mixed):
+          - BTS "Data Bank 28DS" ZIPs (pipe-separated, no header), e.g.
+            DB28SEG.DD.WAC.202501.202512.REL01.03MAR2026.zip  <- easiest, direct download
+          - TranStats CSV exports (with a header row), .csv or .zip
 Output: star-schema tables in data/processed/
     segments.csv       fact table, grain = month x carrier x route x service class x aircraft type
     routes.csv         route dimension (directional, e.g. JFK-LAX)
@@ -18,26 +21,55 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import io
 import sys
+import zipfile
 from pathlib import Path
 
 import pandas as pd
 
-# Columns we need from the raw file. BTS headers are uppercase; we normalise anyway.
+# Columns the pipeline needs after reading either format.
 REQUIRED = [
     "YEAR", "MONTH",
-    "UNIQUE_CARRIER", "UNIQUE_CARRIER_NAME",
-    "ORIGIN", "ORIGIN_CITY_NAME", "ORIGIN_STATE_ABR",
-    "DEST", "DEST_CITY_NAME", "DEST_STATE_ABR",
+    "UNIQUE_CARRIER",
+    "ORIGIN", "ORIGIN_CITY_NAME",
+    "DEST", "DEST_CITY_NAME",
     "DISTANCE", "SEATS", "PASSENGERS",
     "DEPARTURES_SCHEDULED", "DEPARTURES_PERFORMED",
     "CLASS", "AIRCRAFT_TYPE",
 ]
-OPTIONAL = ["FREIGHT", "MAIL"]
+OPTIONAL = ["UNIQUE_CARRIER_NAME", "ORIGIN_STATE_ABR", "DEST_STATE_ABR", "FREIGHT", "MAIL"]
 
 NUMERIC = ["DISTANCE", "SEATS", "PASSENGERS", "DEPARTURES_SCHEDULED",
            "DEPARTURES_PERFORMED", "FREIGHT", "MAIL"]
 
+# Data Bank 28 segment record layout (BTS "File and Record Description - Data Bank 28 Segment Data").
+# Current layout: 28 pipe-separated fields. Pre-Oct-2019 layout: 32 fields (extra zeroed cabin columns).
+DB28_FIELDS_28 = [
+    "YEAR", "MONTH", "ORIGIN", "ORIGIN_CITY_CODE", "ORIGIN_WAC", "ORIGIN_CITY_NAME",
+    "DEST", "DEST_CITY_CODE", "DEST_WAC", "DEST_CITY_NAME",
+    "UNIQUE_CARRIER", "CARRIER_ENTITY", "CARRIER_GROUP", "DISTANCE", "CLASS",
+    "AIRCRAFT_GROUP", "AIRCRAFT_TYPE", "AIRCRAFT_CONFIG",
+    "DEPARTURES_PERFORMED", "DEPARTURES_SCHEDULED", "PAYLOAD", "SEATS",
+    "PASSENGERS", "FREIGHT", "MAIL", "RAMP_TO_RAMP", "AIR_TIME", "CARRIER_WAC",
+]
+DB28_FIELDS_32 = (
+    DB28_FIELDS_28[:22] + ["SEATS_MIDDLE", "SEATS_COACH", "PASSENGERS",
+                           "PASSENGERS_MIDDLE", "PASSENGERS_COACH"] + DB28_FIELDS_28[23:]
+)
+
+# Data Bank files carry carrier codes only. Names for common U.S. carriers; others show their code.
+CARRIER_NAMES = {
+    "AA": "American Airlines", "DL": "Delta Air Lines", "UA": "United Airlines",
+    "WN": "Southwest Airlines", "B6": "JetBlue Airways", "AS": "Alaska Airlines",
+    "NK": "Spirit Airlines", "F9": "Frontier Airlines", "G4": "Allegiant Air",
+    "HA": "Hawaiian Airlines", "SY": "Sun Country Airlines", "MX": "Breeze Airways",
+    "XP": "Avelo Airlines", "OO": "SkyWest Airlines", "YX": "Republic Airways",
+    "9E": "Endeavor Air", "MQ": "Envoy Air", "OH": "PSA Airlines", "YV": "Mesa Airlines",
+    "QX": "Horizon Air", "ZW": "Air Wisconsin", "G7": "GoJet Airlines", "C5": "CommuteAir",
+    "PT": "Piedmont Airlines", "9K": "Cape Air", "3M": "Silver Airways",
+    "5X": "UPS Airlines", "FX": "FedEx Express", "5Y": "Atlas Air",
+}
 # Default service class labels. If data/lookups/L_SERVICE_CLASS.csv exists it overrides these.
 SERVICE_CLASS_DEFAULT = {
     "F": "Scheduled passenger/cargo",
@@ -78,6 +110,107 @@ def read_raw(raw_dir: Path) -> pd.DataFrame:
         if c not in df.columns:
             df[c] = "0"
     return df
+
+
+def _open_text(f: Path):
+    """Return (text_handle, display_name). Handles plain files and ZIPs (largest member)."""
+    if f.suffix.lower() == ".zip":
+        zf = zipfile.ZipFile(f)
+        members = [m for m in zf.infolist() if not m.is_dir()]
+        if not members:
+            sys.exit(f"{f.name} is an empty ZIP.")
+        m = max(members, key=lambda x: x.file_size)
+        return io.TextIOWrapper(zf.open(m), encoding="latin-1", newline=""), f"{f.name}/{m.filename}"
+    return open(f, encoding="latin-1", newline=""), f.name
+
+
+def _first_line(f: Path) -> str:
+    fh, _ = _open_text(f)
+    with fh:
+        return fh.readline().strip()
+
+
+def _read_db28(f: Path, first: str) -> pd.DataFrame:
+    """Pipe-separated Data Bank 28 file. Detects header row, trailing pipe, and 28 vs 32 field layout."""
+    parts = first.split("|")
+    has_header = not parts[0].strip().isdigit()
+    n = len(parts) - (1 if parts[-1].strip() == "" else 0)
+    if has_header:
+        fh, name = _open_text(f)
+        with fh:
+            df = pd.read_csv(fh, sep="|", dtype=str, low_memory=False)
+        df.columns = [c.strip().upper() for c in df.columns]
+        df = df.loc[:, ~df.columns.str.startswith("UNNAMED")]
+        return df, name
+    if n == 28:
+        names = DB28_FIELDS_28
+    elif n == 32:
+        names = DB28_FIELDS_32
+    else:
+        sys.exit(f"{f.name}: expected 28 or 32 pipe-separated fields, found {n}.\n"
+                 f"First line was:\n  {first[:300]}\nSend this line to get the layout fixed.")
+    fh, name = _open_text(f)
+    with fh:
+        df = pd.read_csv(fh, sep="|", header=None, dtype=str, low_memory=False,
+                         usecols=range(n), names=names)
+    return df, name
+
+
+def _read_csv_export(f: Path) -> pd.DataFrame:
+    fh, name = _open_text(f)
+    with fh:
+        df = pd.read_csv(fh, dtype=str, low_memory=False)
+    df.columns = [c.strip().upper() for c in df.columns]
+    df = df.loc[:, ~df.columns.str.startswith("UNNAMED")]
+    return df, name
+
+
+def read_raw(raw_dir: Path) -> pd.DataFrame:
+    files = sorted(p for p in raw_dir.iterdir()
+                   if p.is_file() and not p.name.startswith(".")
+                   and p.suffix.lower() in (".csv", ".zip", ".txt", ".asc", ".dat"))
+    if not files:
+        sys.exit(f"No data files found in {raw_dir}. Download T-100 data first (see docs/BUILD_GUIDE.md).")
+
+    frames = []
+    for f in files:
+        first = _first_line(f)
+        if "|" in first:
+            df, name = _read_db28(f, first)
+            fmt = "Data Bank 28 (pipe)"
+        else:
+            df, name = _read_csv_export(f)
+            fmt = "TranStats CSV"
+        missing = [c for c in REQUIRED if c not in df.columns]
+        if missing:
+            sys.exit(f"{name} is missing required columns: {missing}.")
+        df = df[[c for c in REQUIRED + OPTIONAL if c in df.columns]].copy()
+        df["SOURCE_FILE"] = f.name
+        frames.append(df)
+        print(f"  read {name} [{fmt}]: {len(df):,} rows")
+
+    df = pd.concat(frames, ignore_index=True)
+    for c in REQUIRED + OPTIONAL:
+        df[c] = df[c].astype("string").str.strip() if c in df.columns else pd.NA
+
+    # Fill what the Data Bank format doesn't carry
+    df["UNIQUE_CARRIER"] = df["UNIQUE_CARRIER"].str.upper()
+    df["UNIQUE_CARRIER_NAME"] = (df["UNIQUE_CARRIER_NAME"]
+                                 .fillna(df["UNIQUE_CARRIER"].map(CARRIER_NAMES))
+                                 .fillna(df["UNIQUE_CARRIER"]))
+    for side in ("ORIGIN", "DEST"):
+        city = df[f"{side}_CITY_NAME"].fillna("")
+        state_from_city = city.str.extract(r",\s*([A-Za-z]{2})\s*$")[0].str.upper()
+        df[f"{side}_STATE_ABR"] = df[f"{side}_STATE_ABR"].fillna(state_from_city).fillna("")
+    for c in ("FREIGHT", "MAIL"):
+        df[c] = df[c].fillna("0")
+
+    # Sanity check: catches a layout mismatch before it silently produces nonsense
+    yrs = pd.to_numeric(df["YEAR"], errors="coerce")
+    if yrs.between(1990, 2100).mean() < 0.95:
+        sys.exit("YEAR column doesn't look like years - the file layout was not recognised. "
+                 "Send the first line of the raw file to get it fixed.")
+    return df.astype(object).where(df.notna(), None)
 
 
 def clean(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:

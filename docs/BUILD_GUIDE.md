@@ -8,19 +8,32 @@ Power BI Desktop is free but **Windows only**. On a Mac, use a Windows VM (Paral
 
 ## 1. Download the data
 
-1. Go to https://www.transtats.bts.gov/DatabaseInfo.asp?QO_VQ=EEE (Air Carrier Statistics, All Carriers).
-2. Open **T-100 Domestic Segment (All Carriers)** and go to its download page.
-3. Pick **one year, all months**, and select all fields (or at minimum: `YEAR, MONTH, UNIQUE_CARRIER, UNIQUE_CARRIER_NAME, ORIGIN, ORIGIN_CITY_NAME, ORIGIN_STATE_ABR, DEST, DEST_CITY_NAME, DEST_STATE_ABR, DISTANCE, SEATS, PASSENGERS, DEPARTURES_SCHEDULED, DEPARTURES_PERFORMED, CLASS, AIRCRAFT_TYPE, FREIGHT, MAIL`).
-4. Download the two most recent **complete** years (one file per year) so year-over-year measures work. Add the current year-to-date if you want; the model handles partial years.
-5. Put the files (CSV or ZIP) in `data/raw/`.
-6. Optional but recommended: next to the `CLASS` and `AIRCRAFT_TYPE` fields there are lookup table links. Save them as `data/lookups/L_SERVICE_CLASS.csv` and `data/lookups/L_AIRCRAFT_TYPE.csv` so the dashboard shows aircraft names instead of codes.
+The old TranStats query form is slow and often fails. Use the BTS **Data Bank 28DS** page instead, which offers plain ZIP downloads:
+**https://www.bts.gov/browse-statistical-products-and-data/bts-publications/data-bank-28ds-t-100-domestic-segment-data**
+
+Each file on that page holds **12 months** of data ending in the month named in the link. Two files cover two years:
+
+| Click this link | Covers |
+|---|---|
+| the most recent month at the top of the list | the 12 months ending then |
+| the same month one year earlier | the 12 months before that |
+
+At the time of writing, "May 2026" and "May 2025" together cover June 2024 through May 2026. Overlapping files are fine — duplicate records are removed automatically.
+
+Put both ZIPs in `data/raw/` without unzipping them. The pipeline reads inside ZIPs directly.
+
+These files are pipe-separated with no header row, and the pipeline detects that. It also accepts TranStats CSV exports if you'd rather use the query form, and the two can be mixed.
+
+Two fields aren't in the Data Bank format: carrier names (filled from a built-in list of U.S. carriers; anything unlisted keeps its code) and state abbreviations (read off the city names). Aircraft names need the optional lookup below.
+
+Optional: on the TranStats download page, the `AIRCRAFT_TYPE` field links to a lookup table. Save it as `data/lookups/L_AIRCRAFT_TYPE.csv` and the dashboard shows aircraft names rather than numeric codes. Same for `CLASS` as `L_SERVICE_CLASS.csv`.
 
 ## 2. Run the pipeline
 
 ```bash
-pip install -r requirements.txt
-python -m pytest -q                 # 6 tests should pass
-python scripts/prepare_data.py
+pip3 install -r requirements.txt
+python3 -m pytest -q                # 8 tests should pass
+python3 scripts/prepare_data.py
 ```
 
 Open `data/processed/data_quality.txt`. Write down the row counts, period, route count, carrier count, and network load factor. You will use them in the README and on your resume.

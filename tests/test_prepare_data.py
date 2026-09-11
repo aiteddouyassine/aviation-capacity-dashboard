@@ -84,3 +84,53 @@ def test_service_type_and_market(run):
 def test_quality_report_written(run):
     text = (run["out"] / "data_quality.txt").read_text()
     assert "Dropped exact duplicates" in text and "passengers > seats" in text
+
+
+# --- Data Bank 28 pipe-separated format (direct BTS ZIP downloads) ---
+
+# Field order per BTS "File and Record Description - Data Bank 28 Segment Data".
+DB28_ROWS = [
+    # trailing pipe, as BTS emits it
+    "2025|1|JFK|31703|22|New York, NY|LAX|32575|91|Los Angeles, CA|AA|09031|3|2475|F|6|614|1|30|30|900000|4500|3600|0|0|18000|15000|10|",
+    # cargo-only, no seats -> dropped
+    "2025|1|SDF|31454|43|Louisville, KY|ORD|30977|41|Chicago, IL|5X|55555|8|500|G|7|888|2|10|10|300000|0|0|50000|0|1000|800|10|",
+]
+# Pre-Oct-2019 layout: zeroed middle/coach cabin columns split seats from passengers.
+DB28_LEGACY_ROW = (
+    "2018|3|JFK|31703|22|New York, NY|LAX|32575|91|Los Angeles, CA|AA|09031|3|2475|F|6|614|1|"
+    "30|30|900000|4500|0|0|3600|0|0|0|0|18000|15000|10"
+)
+
+
+def _run_pipeline(tmp_path, filename, text):
+    raw, out, lk = tmp_path / "raw", tmp_path / "out", tmp_path / "lookups"
+    raw.mkdir()
+    lk.mkdir()
+    path = raw / filename
+    if filename.endswith(".zip"):
+        import zipfile
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr(filename.replace(".zip", ".asc"), text)
+    else:
+        path.write_text(text)
+    pdp.main(["--raw", str(raw), "--out", str(out), "--lookups", str(lk)])
+    return pd.read_csv(out / "segments.csv"), pd.read_csv(out / "carriers.csv"), pd.read_csv(out / "routes.csv")
+
+
+def test_reads_zipped_db28_pipe_file(tmp_path):
+    seg, carriers, routes = _run_pipeline(
+        tmp_path, "DB28SEG.DD.WAC.202501.202512.REL01.03MAR2026.zip", "\n".join(DB28_ROWS) + "\n"
+    )
+    assert len(seg) == 1                                   # cargo-only row dropped
+    row = seg.iloc[0]
+    assert (row["seats"], row["passengers"], row["distance_mi"]) == (4500, 3600, 2475)
+    assert row["route_key"] == "JFK-LAX" and row["service_class"] == "F"
+    # carrier names and states aren't in this format; they're filled in
+    assert carriers.set_index("carrier_code").loc["AA", "carrier_name"] == "American Airlines"
+    assert routes.set_index("route_key").loc["JFK-LAX", "origin_state"] == "NY"
+
+
+def test_reads_legacy_32_field_layout(tmp_path):
+    seg, _, _ = _run_pipeline(tmp_path, "legacy.txt", DB28_LEGACY_ROW + "\n")
+    row = seg.iloc[0]
+    assert (row["seats"], row["passengers"]) == (4500, 3600)  # not shifted by the zeroed cabin columns

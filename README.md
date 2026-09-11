@@ -3,7 +3,7 @@
 Power BI dashboard for aviation operations planning: where seat capacity matches passenger demand, which routes need capacity added or pulled back first, and how reliably each operator delivers its scheduled flights.
 
 **Stack:** Power BI (DAX, star schema) · Python (pandas) · pytest
-**Data:** U.S. DOT / BTS T-100 Domestic Segment (All Carriers), `[PERIOD]` — `[N]` segment records, `[N]` routes, `[N]` carriers
+**Data:** U.S. DOT / BTS T-100 Domestic Segment (Data Bank 28DS), `[PERIOD]` — `[N]` segment records, `[N]` routes, `[N]` carriers
 
 ![Overview](screenshots/01_overview.png)
 
@@ -24,7 +24,7 @@ BTS T-100 CSVs ──► scripts/prepare_data.py ──► star schema CSVs ─�
                     aggregate, quality report)   Routes · Carriers · Service Class · Aircraft · Date
 ```
 
-**Data cleaning** (`data/processed/data_quality.txt`): removes duplicate rows from overlapping downloads, drops cargo-only and zero-departure records, and flags (keeps) records where reported passengers exceed seats. Six pytest tests cover filtering, aggregation grain, and dimension integrity.
+**Data pipeline** (`scripts/prepare_data.py`): reads BTS Data Bank 28 pipe-separated files (both the current 28-field and pre-2019 32-field layouts) straight out of their ZIPs, or TranStats CSV exports. It removes duplicate rows from overlapping downloads, drops cargo-only and zero-departure records, and flags (keeps) records where reported passengers exceed seats. Eight pytest tests cover both file layouts, filtering, aggregation grain, and dimension integrity.
 
 **Key DAX** (`powerbi/measures.dax`):
 - `Load Factor` and distance-weighted `Load Factor (RPM/ASM)`
@@ -50,9 +50,9 @@ BTS T-100 CSVs ──► scripts/prepare_data.py ──► star schema CSVs ─�
 ## Run it
 
 ```bash
-pip install -r requirements.txt
-python -m pytest -q
-python scripts/prepare_data.py   # expects raw BTS files in data/raw/
+pip3 install -r requirements.txt
+python3 -m pytest -q
+python3 scripts/prepare_data.py   # expects raw BTS files in data/raw/
 ```
 
 Then follow [docs/BUILD_GUIDE.md](docs/BUILD_GUIDE.md) to rebuild the report, or open `powerbi/aviation_capacity_dashboard.pbix`.
