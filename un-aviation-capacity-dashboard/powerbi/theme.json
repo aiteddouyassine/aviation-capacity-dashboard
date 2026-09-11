@@ -1,0 +1,13 @@
+{
+  "name": "Aviation Ops",
+  "dataColors": ["#009EDB", "#1F3864", "#D68910", "#1E8449", "#C0392B", "#7F8C8D", "#5DADE2", "#A569BD"],
+  "background": "#FFFFFF",
+  "foreground": "#1F2933",
+  "tableAccent": "#009EDB",
+  "good": "#1E8449",
+  "neutral": "#D68910",
+  "bad": "#C0392B",
+  "maximum": "#C0392B",
+  "center": "#FFFFFF",
+  "minimum": "#D68910"
+}

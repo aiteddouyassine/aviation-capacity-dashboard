@@ -1,0 +1,205 @@
+// =====================================================================
+// Aviation Capacity vs Demand Dashboard - DAX
+// Tables: Segments (fact), Routes, Carriers, 'Service Class', Aircraft,
+//         'Date' (calculated, below), 'LF Target' (what-if parameter)
+// Create each measure in a _Measures table: Home > Enter data > name it _Measures
+// Paste ONE measure at a time (Modeling > New measure).
+// =====================================================================
+
+
+// ---------------------------------------------------------------------
+// 1. DATE TABLE  (Modeling > New table). Then: Mark as date table on [Date],
+//    and sort [Month] by [Month Number].
+// ---------------------------------------------------------------------
+Date =
+VAR MinDate    = DATE ( YEAR ( MIN ( Segments[month_start] ) ), 1, 1 )
+VAR MaxDate    = DATE ( YEAR ( MAX ( Segments[month_start] ) ), 12, 31 )
+VAR LastLoaded = EOMONTH ( MAX ( Segments[month_start] ), 0 )
+RETURN
+    ADDCOLUMNS (
+        CALENDAR ( MinDate, MaxDate ),
+        "Year", YEAR ( [Date] ),
+        "Quarter", "Q" & QUARTER ( [Date] ),
+        "Month Number", MONTH ( [Date] ),
+        "Month", FORMAT ( [Date], "MMM" ),
+        "Year-Month", FORMAT ( [Date], "YYYY-MM" ),
+        "Is Loaded Period", [Date] <= LastLoaded
+    )
+
+
+// ---------------------------------------------------------------------
+// 2. LOAD FACTOR TARGET  (Modeling > New parameter > Numeric range)
+//    Name: LF Target | Min 0.50 | Max 0.95 | Increment 0.01 | Default 0.80
+//    Power BI auto-creates this measure; if not, create it:
+// ---------------------------------------------------------------------
+LF Target Value = SELECTEDVALUE ( 'LF Target'[LF Target], 0.80 )
+
+
+// ---------------------------------------------------------------------
+// 3. BASE MEASURES
+// ---------------------------------------------------------------------
+Seats = SUM ( Segments[seats] )
+
+Passengers = SUM ( Segments[passengers] )
+
+Empty Seats = [Seats] - [Passengers]
+
+Departures Performed = SUM ( Segments[departures_performed] )
+
+Departures Scheduled = SUM ( Segments[departures_scheduled] )
+
+ASM = SUM ( Segments[asm] )
+
+RPM = SUM ( Segments[rpm] )
+
+Route Count = DISTINCTCOUNT ( Segments[route_key] )
+
+
+// ---------------------------------------------------------------------
+// 4. OCCUPANCY  (format Load Factor measures as % with 1 decimal)
+// ---------------------------------------------------------------------
+Load Factor = DIVIDE ( [Passengers], [Seats] )
+
+// Industry-standard, distance-weighted: long routes count more than short hops
+Load Factor (RPM/ASM) = DIVIDE ( [RPM], [ASM] )
+
+Seats per Departure = DIVIDE ( [Seats], [Departures Performed] )
+
+Passengers per Departure = DIVIDE ( [Passengers], [Departures Performed] )
+
+
+// ---------------------------------------------------------------------
+// 5. DEMAND VS CAPACITY  (driven by the LF Target slicer)
+// ---------------------------------------------------------------------
+// Seats you would need to carry current demand at the target load factor
+Seats Needed at Target = DIVIDE ( [Passengers], [LF Target Value] )
+
+// > 0  : demand exceeds target capacity  -> under-capacity (add seats)
+// < 0  : more seats than demand needs    -> over-capacity (reallocate)
+Capacity Gap (Seats) = [Seats Needed at Target] - [Seats]
+
+Capacity Status =
+VAR lf         = [Load Factor]
+VAR tgt        = [LF Target Value]
+VAR UpperBand  = 0.10    // this far ABOVE target = under-capacity
+VAR LowerBand  = 0.15    // this far BELOW target = over-capacity
+RETURN
+    SWITCH (
+        TRUE (),
+        ISBLANK ( lf ), BLANK (),
+        lf >= tgt + UpperBand, "Under-capacity",
+        lf <= tgt - LowerBand, "Over-capacity",
+        "Balanced"
+    )
+
+// Use for conditional formatting: Format > Font color > fx > Field value
+Status Color =
+SWITCH (
+    [Capacity Status],
+    "Under-capacity", "#C0392B",
+    "Over-capacity",  "#D68910",
+    "Balanced",       "#1E8449"
+)
+
+Routes Under-capacity =
+COUNTROWS ( FILTER ( VALUES ( Routes[route_key] ), [Capacity Status] = "Under-capacity" ) )
+
+Routes Balanced =
+COUNTROWS ( FILTER ( VALUES ( Routes[route_key] ), [Capacity Status] = "Balanced" ) )
+
+Routes Over-capacity =
+COUNTROWS ( FILTER ( VALUES ( Routes[route_key] ), [Capacity Status] = "Over-capacity" ) )
+
+
+// ---------------------------------------------------------------------
+// 6. PRIORITY MANAGEMENT
+//    Ranks routes by seats misallocated vs target, so a big route that is
+//    10 pts off outranks a tiny route that is 30 pts off (volume matters).
+//    Use in a table that has Routes[route_key] as the row field.
+// ---------------------------------------------------------------------
+Priority Score = ABS ( [Capacity Gap (Seats)] )
+
+Route Priority Rank =
+IF (
+    ISINSCOPE ( Routes[route_key] ) && NOT ISBLANK ( [Seats] ),
+    RANKX ( ALLSELECTED ( Routes[route_key] ), [Priority Score], , DESC, DENSE )
+)
+
+Priority Tier =
+VAR r = [Route Priority Rank]
+RETURN
+    SWITCH (
+        TRUE (),
+        ISBLANK ( r ), BLANK (),
+        r <= 10, "P1 - Act now",
+        r <= 30, "P2 - Review",
+        "P3 - Monitor"
+    )
+
+Title Priority =
+"Routes ranked by seats misallocated vs a "
+    & FORMAT ( [LF Target Value], "0%" )
+    & " load factor target"
+
+
+// ---------------------------------------------------------------------
+// 7. OPERATOR PERFORMANCE  (carriers ~ third-party operators on contract)
+// ---------------------------------------------------------------------
+// Share of scheduled departures actually flown; extra sections above
+// schedule are capped so they cannot hide cancellations elsewhere.
+Completion Rate =
+VAR Sched = FILTER ( Segments, Segments[departures_scheduled] > 0 )
+RETURN
+    DIVIDE (
+        SUMX ( Sched, MIN ( Segments[departures_performed], Segments[departures_scheduled] ) ),
+        SUMX ( Sched, Segments[departures_scheduled] )
+    )
+
+Charter Share (Departures) =
+DIVIDE (
+    CALCULATE ( [Departures Performed], 'Service Class'[service_type] = "Charter" ),
+    CALCULATE ( [Departures Performed], REMOVEFILTERS ( 'Service Class' ) )
+)
+
+
+// ---------------------------------------------------------------------
+// 8. TIME INTELLIGENCE
+//    'Is Loaded Period' stops a partial current year being compared with a
+//    full prior year (e.g. Jan-May 2026 vs all of 2025).
+// ---------------------------------------------------------------------
+Passengers PY =
+CALCULATE (
+    [Passengers],
+    CALCULATETABLE ( SAMEPERIODLASTYEAR ( 'Date'[Date] ), 'Date'[Is Loaded Period] = TRUE () )
+)
+
+Seats PY =
+CALCULATE (
+    [Seats],
+    CALCULATETABLE ( SAMEPERIODLASTYEAR ( 'Date'[Date] ), 'Date'[Is Loaded Period] = TRUE () )
+)
+
+Load Factor PY = DIVIDE ( [Passengers PY], [Seats PY] )
+
+Passengers YoY % =
+IF ( NOT ISBLANK ( [Passengers PY] ), DIVIDE ( [Passengers] - [Passengers PY], [Passengers PY] ) )
+
+Seats YoY % =
+IF ( NOT ISBLANK ( [Seats PY] ), DIVIDE ( [Seats] - [Seats PY], [Seats PY] ) )
+
+// Format string: +0.0%;-0.0%;0.0%   (read as percentage POINTS)
+Load Factor YoY (pts) =
+IF ( NOT ISBLANK ( [Load Factor PY] ) && NOT ISBLANK ( [Load Factor] ), [Load Factor] - [Load Factor PY] )
+
+// > 0 : demand growing faster than capacity -> tightening
+Demand minus Capacity Growth (pts) = [Passengers YoY %] - [Seats YoY %]
+
+Load Factor 3M Rolling =
+CALCULATE ( [Load Factor], DATESINPERIOD ( 'Date'[Date], MAX ( 'Date'[Date] ), -3, MONTH ) )
+
+
+// ---------------------------------------------------------------------
+// 9. LABELS
+// ---------------------------------------------------------------------
+Data Through =
+"Data through " & FORMAT ( CALCULATE ( MAX ( Segments[month_start] ), ALL ( Segments ) ), "MMM YYYY" )
